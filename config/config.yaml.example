@@ -1,0 +1,38 @@
+# Copy to /etc/lustre-cli/config.yaml
+
+iscsi:
+  portal_ip: "0.0.0.0"
+  portal_port: 3260
+  target_iqn_prefix: "iqn.2024-05.com.lustre-cli"
+  initiator_iqn: ""
+
+lustre:
+  fsname: "lustrefs"
+  mgsnode: "10.0.0.10@tcp"
+  mgs_device: "/dev/sdb"
+  mdt_device: "/dev/sdc"
+  ost_devices:
+    - "/dev/sdd"
+    - "/dev/sde"
+  mount:
+    mgs: "/mnt/lustre/mgs"
+    mdt: "/mnt/lustre/mdt"
+    ost_base: "/mnt/lustre/ost"
+    client: "/mnt/lustre/client"
+  lnet:
+    net: "tcp"
+    interfaces:
+      - "eth0"
+
+benchmark:
+  output_dir: "/var/lib/lustre-cli/benchmarks"
+  fio_runtime_sec: 30
+
+logging:
+  file: "/var/log/lustre-cli.log"
+  level: "INFO"
+
+targets: []
+
+initiator:
+  sessions: []
