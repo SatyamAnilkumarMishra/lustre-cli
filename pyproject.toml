@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lustre-cli"
+version = "1.0.0"
+description = "Linux CLI for iSCSI-backed Lustre storage management"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "lustre-cli contributors" }]
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+lustre-cli = "lustre_cli.main:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lustre_cli*"]
