@@ -11,7 +11,7 @@ from lustre_cli.deps import check_tools
 from lustre_cli.logging_util import get_logger
 from lustre_cli.utils import CLIError
 
-log = get_logger()
+# FIXED: Removed the global module-level instantiation to prevent early bootstrap racing
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -26,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="lustre-cli",
         description="iSCSI-backed Lustre storage management CLI",
     )
+    # FIXED: Actually call the common argument registration helper to expose the --config flag
+    _add_common(parser)
+    
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -130,7 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _dispatch(args)
     except CLIError as exc:
-        log.error(str(exc))
+        # FIXED: Fetching the logger safely here ensures it respects the environment changes above
+        logger = get_logger()
+        logger.error(str(exc))
         print(str(exc), file=sys.stderr)
         return exc.exit_code
 
