@@ -40,7 +40,8 @@ def cmd_simulate_ost_failure(ost_index: int = 0) -> None:
         _log_fault("ost_failure", f"OST mount {ost_mp} not found", "ost_offline")
         raise CLIError(f"OST mount not found: {ost_mp}")
 
-    result = run_cmd(["umount", ost_mp], check=False)
+    # FIXED: Added capture=True so stderr is actually read upon unmount failures
+    result = run_cmd(["umount", ost_mp], check=False, capture=True)
     if result.returncode == 0:
         _log_fault("ost_failure", f"Unmounted OST {ost_index} at {ost_mp}", "ost_offline")
         print("Observe client behavior: lfs df, writes to client mount.")
@@ -62,8 +63,10 @@ def cmd_simulate_bad_config() -> None:
     bad_mgsnode = "192.0.2.254@tcp"  # TEST-NET-1, should be unreachable
     fake_mp = "/mnt/lustre/fault-test-mdt"
     Path(fake_mp).mkdir(parents=True, exist_ok=True)
+    
+    # FIXED: Replaced forward slash with mandatory colon separator for valid mount syntax
     result = run_cmd(
-        ["mount", "-t", "lustre", f"{bad_mgsnode}/{lustre['fsname']}/MDT0000", fake_mp],
+        ["mount", "-t", "lustre", f"{bad_mgsnode}:/{lustre['fsname']}/MDT0000", fake_mp],
         check=False,
         capture=True,
     )
@@ -118,4 +121,6 @@ def cmd_simulate_network_drop(host: str | None = None, iqn: str | None = None) -
         capture=True,
     )
     if disc.returncode != 0:
-        _log_fault("network_drop", f"Discovery to {bad_portal} failed: {disc.stderr.strip()}", "network_drop")
+        # FIXED: Wrapped disc.stderr in a None-safe fallback guard before calling .strip()
+        err_msg = (disc.stderr or "").strip()
+        _log_fault("network_drop", f"Discovery to {bad_portal} failed: {err_msg}", "network_drop")
