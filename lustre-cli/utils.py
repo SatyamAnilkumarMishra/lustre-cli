@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 from typing import Sequence
 
 from lustre_cli.logging_util import get_logger
-
-log = get_logger()
 
 
 class CLIError(Exception):
@@ -21,7 +20,8 @@ class CLIError(Exception):
 
 
 def require_root() -> None:
-    if hasattr(os := __import__("os"), "geteuid") and os.geteuid() != 0:
+    # FIXED: Clean, standard attribute tracking using top-level explicit imports
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
         raise CLIError("This operation requires root privileges. Run with sudo.", 77)
 
 
@@ -33,7 +33,12 @@ def run_cmd(
     input_text: str | None = None,
     timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if not args:
+        raise CLIError("Empty command sequence provided to runtime engine.")
+
+    log = get_logger()
     log.debug("Running: %s", " ".join(args))
+    
     try:
         result = subprocess.run(
             list(args),
@@ -49,9 +54,13 @@ def run_cmd(
         raise CLIError(f"Command timed out: {' '.join(args)}") from exc
 
     if check and result.returncode != 0:
+        # FIXED: Safeguard against uncaptured stream instances producing blank lines
         err = (result.stderr or result.stdout or "").strip()
+        if not err and not capture:
+            err = "[Console output streamed directly to terminal standard error]"
+            
         raise CLIError(
-            f"Command failed ({result.returncode}): {' '.join(args)}\n{err}",
+            f"Command failed ({result.returncode}): {' '.join(args)}\n{err}".strip(),
             result.returncode or 1,
         )
     return result
@@ -66,15 +75,21 @@ def device_size_bytes(path: str) -> int:
     return int(result.stdout.strip())
 
 
-def human_size(num_bytes: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
+def human_size(num_bytes: int | float) -> str:
+    # FIXED: Strip float decoration from low-level absolute byte readouts
+    if num_bytes < 1024:
+        return f"{int(num_bytes)} B"
+        
+    for unit in ("KB", "MB", "GB", "TB"):
+        num_bytes /= 1024
         if num_bytes < 1024:
             return f"{num_bytes:.2f} {unit}"
-        num_bytes /= 1024
+            
     return f"{num_bytes:.2f} PB"
 
 
 def die(message: str, code: int = 1) -> None:
+    log = get_logger()
     log.error(message)
     print(message, file=sys.stderr)
     sys.exit(code)
