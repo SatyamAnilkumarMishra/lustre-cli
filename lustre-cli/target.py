@@ -9,8 +9,6 @@ from lustre_cli.deps import check_tools
 from lustre_cli.logging_util import get_logger
 from lustre_cli.utils import CLIError, require_root, run_cmd
 
-log = get_logger()
-
 
 def _iqn_for_lun(cfg: dict, lun: int) -> str:
     prefix = cfg["iscsi"]["target_iqn_prefix"].rstrip(".")
@@ -31,7 +29,9 @@ def cmd_create(
 ) -> None:
     require_root()
     check_tools("target")
+    log = get_logger()
     cfg = load_config()
+    
     device_path = Path(device)
     if not device_path.exists():
         raise CLIError(f"Block device not found: {device}")
@@ -41,7 +41,9 @@ def cmd_create(
     iqn = _iqn_for_lun(cfg, lun)
     bs_name = f"bs_lun{lun}"
     tpg = f"/iscsi/{iqn}/tpg1"
-    portal = f"{tpg}/portals/{ip}:{port}"
+    
+    # FIXED: point to the parent collection node for portal creation context
+    portals_dir = f"{tpg}/portals"
 
     if backstore_type not in ("block", "fileio"):
         raise CLIError("backstore_type must be 'block' or 'fileio'")
@@ -50,7 +52,8 @@ def cmd_create(
         f"/backstores/{backstore_type} create name={bs_name} {device}",
         f"/iscsi create {iqn}",
         f"{tpg}/luns create /backstores/{backstore_type}/{bs_name}",
-        f"{portal} create {ip} {port}" if ip != "0.0.0.0" else f"{portal} create",
+        # FIXED: run the create verb from the target-agnostic collection directory
+        f"{portals_dir} create {ip} {port}" if ip != "0.0.0.0" else f"{portals_dir} create",
         f"{tpg}/set attribute authentication=0",
         f"{tpg}/set attribute generate_node_acls=1",
         "saveconfig",
@@ -58,8 +61,11 @@ def cmd_create(
     log.info("Creating iSCSI target %s on %s:%s for %s", iqn, ip, port, device)
     _targetcli_batch(cmds)
 
+    # Clean up preexisting array indexes matching this LUN to preserve unique state mapping
     targets = cfg.setdefault("targets", [])
-    targets.append(
+    cfg["targets"] = [t for t in targets if t.get("lun") != lun and t.get("iqn") != iqn]
+    
+    cfg["targets"].append(
         {
             "iqn": iqn,
             "lun": lun,
@@ -67,6 +73,7 @@ def cmd_create(
             "portal_ip": ip,
             "portal_port": port,
             "backstore": bs_name,
+            "backstore_type": backstore_type,  # FIXED: track type explicitly to handle safe teardown later
         }
     )
     save_config(cfg)
@@ -89,9 +96,11 @@ def cmd_list() -> None:
 def cmd_delete(iqn: str | None = None, lun: int | None = None) -> None:
     require_root()
     check_tools("target")
+    log = get_logger()
     cfg = load_config()
     targets = cfg.get("targets", [])
     to_remove = []
+    
     for t in targets:
         if iqn and t["iqn"] != iqn:
             continue
@@ -110,9 +119,12 @@ def cmd_delete(iqn: str | None = None, lun: int | None = None) -> None:
     for t in to_remove:
         iqn_path = f"/iscsi/{t['iqn']}"
         bs = t.get("backstore", "")
+        bs_type = t.get("backstore_type", "block")  # FIXED: Fallback safely but respect configuration type
+        
         cmds = [f"{iqn_path} delete"]
         if bs:
-            cmds.append(f"/backstores/block delete {bs}")
+            # FIXED: Target the explicit functional path node type
+            cmds.append(f"/backstores/{bs_type} delete {bs}")
         cmds.append("saveconfig")
         _targetcli_batch(cmds)
         log.info("Deleted target %s", t["iqn"])
@@ -125,8 +137,9 @@ def cmd_delete(iqn: str | None = None, lun: int | None = None) -> None:
 def persist_config() -> None:
     """Persist targetcli config (also called on create/delete)."""
     require_root()
+    log = get_logger()
     run_cmd(["targetcli", "saveconfig"])
-    # RHEL/CentOS
+    # RHEL/CentOS path hooks
     for path in ("/etc/target/saveconfig.json", "/etc/target/saveconfig.json.bak"):
         if Path(path).exists():
             log.info("Target config saved to %s", path)
