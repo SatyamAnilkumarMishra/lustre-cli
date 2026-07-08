@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from lustre_cli.config import load_config, save_config
@@ -45,7 +46,15 @@ def cmd_login(host: str, iqn: str, port: int = 3260) -> None:
     run_cmd(["iscsiadm", "-m", "node", "-T", iqn, "-p", portal, "--login"])
     run_cmd(["iscsiadm", "-m", "node", "-T", iqn, "-p", portal, "-o", "update", "-n", "node.startup", "-v", "automatic"])
 
-    device = _find_session_device(iqn)
+    # FIXED: Added a polling retry engine to settle the asynchronous kernel SCSI subsystem creation
+    device = None
+    log.info("Waiting for kernel to map block device for target %s...", iqn)
+    for _ in range(10):
+        device = _find_session_device(iqn)
+        if device and Path(device).exists():
+            break
+        time.sleep(0.5)
+
     if device:
         size = device_size_bytes(device)
         print(f"Logged in. Device: {device} ({human_size(size)})")
@@ -71,16 +80,14 @@ def _find_session_device(iqn: str) -> str | None:
         if m:
             current_iqn = m.group(1)
         if current_iqn == iqn:
-            dm = re.search(r"Attached scsi disk (\S+)", line)
+            # FIXED: Updated regex map to intercept modern open-iscsi "Device: /dev/sdX" outputs
+            dm = re.search(r"(?:Attached scsi disk|Device:)\s+(\S+)", line)
             if dm:
                 dev = dm.group(1)
                 return dev if dev.startswith("/dev/") else f"/dev/{dev}"
-    # fallback: newest sd device from lsblk
-    lsblk = run_cmd(["lsblk", "-dn", "-o", "NAME,TYPE,TRAN"], capture=True, check=False)
-    for line in reversed(lsblk.stdout.splitlines()):
-        parts = line.split()
-        if len(parts) >= 3 and parts[1] == "disk" and parts[2] == "iscsi":
-            return f"/dev/{parts[0]}"
+                
+    # FIXED: Removed the unreliable, blind lsblk fallback. 
+    # By ensuring our regex maps correctly and polling over the session data, the target mapping is definitive.
     return None
 
 
