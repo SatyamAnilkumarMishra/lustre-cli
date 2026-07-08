@@ -56,8 +56,11 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     data = deepcopy(DEFAULTS)
     if cfg_path.is_file():
         with cfg_path.open(encoding="utf-8") as fh:
-            loaded = yaml.safe_load(fh) or {}
-        _deep_merge(data, loaded)
+            loaded = yaml.safe_load(fh)
+            
+        # Defensive Type Guard: Only merge if the file parses into a structured dictionary
+        if isinstance(loaded, dict):
+            _deep_merge(data, loaded)
     return data
 
 
@@ -75,3 +78,4 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
             _deep_merge(base[key], value)
         else:
             base[key] = value
+
