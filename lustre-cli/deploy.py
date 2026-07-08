@@ -138,9 +138,8 @@ def cmd_mount() -> None:
     for mp in (mgs_mp, mdt_mp, ost_base, client_mp):
         Path(mp).mkdir(parents=True, exist_ok=True)
 
-    mgs_spec = f"{mgsnode}/{fsname}/MGS"
-    mdt_spec = f"{mgsnode}/{fsname}/MDT0000"
-    client_spec = f"{mgsnode}/{fsname}"
+    # FIXED: Added the mandatory colon separator required for Lustre client mount strings
+    client_spec = f"{mgsnode}:/{fsname}"
 
     if lustre.get("mgs_device"):
         _mount(lustre["mgs_device"], mgs_mp, ["-t", "lustre"])
@@ -157,7 +156,7 @@ def cmd_mount() -> None:
     cfg.setdefault("deploy", {})["mounted"] = True
     save_config(cfg)
     print("Lustre components mounted.")
-    print(f"  Client mount: {client_mp}")
+    print(f"   Client mount: {client_mp}")
 
 
 def _mount(device_or_spec: str, mountpoint: str, extra_opts: list[str]) -> None:
@@ -205,4 +204,7 @@ def cmd_unmount() -> None:
 
 def _umount(path: str) -> None:
     if Path(path).exists() and _is_mounted(path):
-        run_cmd(["umount", path], check=False)
+        # Fallback to a lazy unmount (-l) if a target partition is busy to prevent terminal hangs
+        if run_cmd(["umount", path], check=False).returncode != 0:
+            log.warning("Mountpoint %s busy, attempting lazy unmount...", path)
+            run_cmd(["umount", "-l", path], check=False)
