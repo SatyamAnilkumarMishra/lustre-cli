@@ -161,3 +161,55 @@ def _run_dd_benchmark(mp: Path, stripes: list[int]) -> list[dict]:
                 "tool": "dd",
             }
         )
+
+        start = time.perf_counter()
+        run_cmd(
+            ["dd", "bs=1M", f"count={block_mb}", f"if={testfile}", "of=/dev/null", "status=none"],
+            check=False,
+        )
+        read_elapsed = max(time.perf_counter() - start, 0.001)
+        results.append(
+            {
+                "job": f"seqread_stripe{stripe}",
+                "stripe_count": stripe,
+                "throughput_mbps": round(block_mb / read_elapsed, 2),
+                "iops": 0,
+                "latency_ms": 0,
+                "tool": "dd",
+            }
+        )
+    return results
+
+
+def _print_table(results: list[dict]) -> None:
+    headers = ("Job", "Stripes", "MB/s", "IOPS", "Latency(ms)", "Tool")
+    rows = [
+        (
+            r["job"],
+            str(r["stripe_count"]),
+            str(r["throughput_mbps"]),
+            str(r["iops"]),
+            str(r["latency_ms"]),
+            r["tool"],
+        )
+        for r in results
+    ]
+    widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(headers)]
+    fmt = "  ".join(f"{{:{w}}}" for w in widths)
+    print(fmt.format(*headers))
+    print("-" * (sum(widths) + 2 * (len(headers) - 1)))
+    for row in rows:
+        print(fmt.format(*row))
+
+
+def cmd_report(path: str | None = None) -> None:
+    cfg = load_config()
+    report = path or cfg.get("benchmark", {}).get("last_report")
+    if not report or not Path(report).exists():
+        raise CLIError("No benchmark report found. Run 'lustre-cli benchmark run' first.")
+    data = json.loads(Path(report).read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        _print_table(data)
+    else:
+        print(json.dumps(data, indent=2))
+    print(f"\nSource: {report}")
