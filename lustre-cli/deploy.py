@@ -1,4 +1,4 @@
-"""Module 3 — Lustre filesystem deployment."""
+"""Module 3 — Lustre filesystem deployment with state tracking and rollbacks."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from lustre_cli.config import load_config, save_config
 from lustre_cli.deps import check_tools
 from lustre_cli.logging_util import get_logger
 from lustre_cli.utils import CLIError, require_root, run_cmd, tool_available
+from lustre_cli.state import load_state, save_state, mark_formatted, mark_mounted
 
 log = get_logger()
 
@@ -33,6 +34,15 @@ def _configure_lnet(cfg: dict) -> None:
     run_cmd(["lnetctl", "lnet", "up"], check=False)
 
 
+def is_device_formatted_lustre(device: str) -> bool:
+    from lustre_cli.utils import is_dry_run
+    if is_dry_run():
+        return False
+    # Run blkid to check filesystem type
+    res = run_cmd(["blkid", "-o", "value", "-s", "TYPE", device], check=False, capture=True)
+    return "lustre" in res.stdout.strip().lower()
+
+
 def cmd_format(
     mgs_device: str | None = None,
     mdt_device: str | None = None,
@@ -40,10 +50,13 @@ def cmd_format(
     mgsnode: str | None = None,
     fsname: str | None = None,
     force: bool = False,
+    yes: bool = False,
 ) -> None:
     require_root()
     check_tools("deploy")
     cfg = load_config()
+    state = load_state()
+
     lustre = cfg["lustre"]
     mgs_dev = mgs_device or lustre.get("mgs_device")
     mdt_dev = mdt_device or lustre.get("mdt_device")
@@ -62,149 +75,14 @@ def cmd_format(
 
     _validate_devices([mgs_dev, mdt_dev, *osts])
 
-    _load_modules()
-    _configure_lnet(cfg)
-
-    force_flag = ["--force"] if force else []
-    mgsnode_arg = f"--mgsnode={mgs_node}"
-
-    log.info("Formatting MGS on %s", mgs_dev)
-    run_cmd(
-        ["mkfs.lustre", "--mgs", f"--fsname={name}", "--reformat", *force_flag, mgs_dev]
-    )
-
-    log.info("Formatting MDT on %s", mdt_dev)
-    run_cmd(
-        [
-            "mkfs.lustre",
-            "--mdt",
-            mgsnode_arg,
-            f"--fsname={name}",
-            "--index=0",
-            "--reformat",
-            *force_flag,
-            mdt_dev,
-        ]
-    )
-
-    for idx, ost_dev in enumerate(osts):
-        log.info("Formatting OST %d on %s", idx, ost_dev)
-        run_cmd(
-            [
-                "mkfs.lustre",
-                "--ost",
-                mgsnode_arg,
-                f"--fsname={name}",
-                f"--index={idx}",
-                "--reformat",
-                *force_flag,
-                ost_dev,
-            ]
-        )
-
-    lustre["mgs_device"] = mgs_dev
-    lustre["mdt_device"] = mdt_dev
-    lustre["ost_devices"] = osts
-    lustre["mgsnode"] = mgs_node
-    lustre["fsname"] = name
-    save_config(cfg)
-    print(f"Lustre filesystem '{name}' formatted (MGS, MDT, {len(osts)} OST(s)).")
-
-
-def _validate_devices(devices: list[str]) -> None:
-    for dev in devices:
-        if not Path(dev).exists():
-            raise CLIError(f"Device not found: {dev}")
-
-
-def cmd_mount() -> None:
-    require_root()
-    check_tools("deploy")
-    cfg = load_config()
-    lustre = cfg["lustre"]
-    mounts = lustre["mount"]
-    mgsnode = lustre.get("mgsnode", "")
-    fsname = lustre["fsname"]
-    osts = lustre.get("ost_devices", [])
-
-    _load_modules()
-    _configure_lnet(cfg)
-
-    mgs_mp = mounts["mgs"]
-    mdt_mp = mounts["mdt"]
-    ost_base = mounts["ost_base"]
-    client_mp = mounts["client"]
-
-    for mp in (mgs_mp, mdt_mp, ost_base, client_mp):
-        Path(mp).mkdir(parents=True, exist_ok=True)
-
-    # FIXED: Added the mandatory colon separator required for Lustre client mount strings
-    client_spec = f"{mgsnode}:/{fsname}"
-
-    if lustre.get("mgs_device"):
-        _mount(lustre["mgs_device"], mgs_mp, ["-t", "lustre"])
-    if lustre.get("mdt_device"):
-        _mount(lustre["mdt_device"], mdt_mp, ["-t", "lustre"])
-    for idx, ost_dev in enumerate(osts):
-        ost_mp = f"{ost_base}{idx:04d}"
-        Path(ost_mp).mkdir(parents=True, exist_ok=True)
-        _mount(ost_dev, ost_mp, ["-t", "lustre"])
-
-    # Client mount aggregates namespace
-    _mount(client_spec, client_mp, ["-t", "lustre", "-o", "user_xattr"])
-
-    cfg.setdefault("deploy", {})["mounted"] = True
-    save_config(cfg)
-    print("Lustre components mounted.")
-    print(f"   Client mount: {client_mp}")
-
-
-def _mount(device_or_spec: str, mountpoint: str, extra_opts: list[str]) -> None:
-    if _is_mounted(mountpoint):
-        log.info("%s already mounted", mountpoint)
-        return
-    args = ["mount"] + extra_opts + [device_or_spec, mountpoint]
-    run_cmd(args)
-
-
-def _is_mounted(path: str) -> bool:
-    result = run_cmd(["findmnt", "-n", path], capture=True, check=False)
-    return result.returncode == 0
-
-
-def cmd_status() -> None:
-    check_tools("deploy")
-    print("=== mount points ===")
-    run_cmd(["findmnt", "-t", "lustre"], check=False)
-    print("\n=== lctl dl ===")
-    run_cmd(["lctl", "dl"], check=False)
-    print("\n=== lfs df ===")
-    run_cmd(["lfs", "df", "-h"], check=False)
-
-
-def cmd_unmount() -> None:
-    require_root()
-    cfg = load_config()
-    mounts = cfg["lustre"]["mount"]
-    client_mp = mounts["client"]
-    ost_base = mounts["ost_base"]
-    osts = cfg["lustre"].get("ost_devices", [])
-
-    # Client first
-    _umount(client_mp)
-    for idx in range(len(osts) - 1, -1, -1):
-        _umount(f"{ost_base}{idx:04d}")
-    _umount(mounts["mdt"])
-    _umount(mounts["mgs"])
-
-    cfg.setdefault("deploy", {})["mounted"] = False
-    save_config(cfg)
-    print("Lustre components unmounted.")
-
-
-def _umount(path: str) -> None:
-    if Path(path).exists() and _is_mounted(path):
-        # Fallback to a lazy unmount (-l) if a target partition is busy to prevent terminal hangs
-        if run_cmd(["umount", path], check=False).returncode != 0:
-            log.warning("Mountpoint %s busy, attempting lazy unmount...", path)
-            run_cmd(["umount", "-l", path], check=False)
+    from lustre_cli.utils import is_dry_run
+    if force and not yes and not is_dry_run():
+        print("WARNING: Reformat (--force) requested. This will permanently destroy data on target devices!")
+        print("Devices to be reformatted:")
+        print(f"  - MGS: {mgs_dev}")
+        print(f"  - MDT: {mdt_dev}")
+        for o in osts:
+            print(f"  - OST: {o}")
+        val = input("Are you absolutely sure you want to format these devices? [y/N]: ")
+        if val.lower() not in ("y", "yes"):
+            raise CLIError("Operation cancelled.")
