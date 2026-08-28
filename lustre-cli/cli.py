@@ -202,3 +202,100 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         log.exception("Unexpected error occurred: %s", exc)
         return 1
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+    cmd = args.command
+
+    if cmd == "check-deps":
+        check_tools()
+        log.info("All required tools are available.")
+        return 0
+
+    if cmd == "status":
+        status.cmd_status(as_json=args.json)
+        return 0
+
+    if cmd == "target":
+        if args.target_cmd == "create":
+            target.cmd_create(
+                args.device, args.lun, args.portal_ip, args.portal_port, args.backstore
+            )
+        elif args.target_cmd == "list":
+            target.cmd_list()
+        elif args.target_cmd == "delete":
+            target.cmd_delete(args.iqn, args.lun)
+        return 0
+
+    if cmd == "initiator":
+        if args.initiator_cmd == "discover":
+            initiator.cmd_discover(args.host, args.port)
+        elif args.initiator_cmd == "login":
+            initiator.cmd_login(args.host, args.iqn, args.port)
+        elif args.initiator_cmd == "logout":
+            initiator.cmd_logout(args.host, args.iqn, args.port)
+        elif args.initiator_cmd == "status":
+            initiator.cmd_status()
+        return 0
+
+    if cmd == "deploy":
+        if args.deploy_cmd == "format":
+            deploy.cmd_format(
+                args.mgs_device,
+                args.mdt_device,
+                args.ost_devices,
+                args.mgsnode,
+                args.fsname,
+                args.force,
+                yes=args.yes,
+            )
+        elif args.deploy_cmd == "mount":
+            deploy.cmd_mount()
+        elif args.deploy_cmd == "status":
+            deploy.cmd_status()
+        elif args.deploy_cmd == "unmount":
+            deploy.cmd_unmount()
+        return 0
+
+    if cmd == "validate":
+        if args.validate_cmd == "basic":
+            validate.cmd_basic()
+        elif args.validate_cmd == "stripe":
+            validate.cmd_stripe()
+        elif args.validate_cmd == "integrity":
+            validate.cmd_integrity()
+        return 0
+
+    if cmd == "benchmark":
+        if args.benchmark_cmd == "run":
+            benchmark.cmd_run(args.runtime, args.stripes, args.dd)
+        elif args.benchmark_cmd == "report":
+            benchmark.cmd_report(args.file)
+        return 0
+
+    if cmd == "fault":
+        if args.fault_cmd == "simulate-ost-failure":
+            fault.cmd_simulate_ost_failure(args.index)
+        elif args.fault_cmd == "simulate-bad-config":
+            fault.cmd_simulate_bad_config()
+        elif args.fault_cmd == "simulate-network-drop":
+            fault.cmd_simulate_network_drop(args.host, args.iqn)
+        return 0
+
+    if cmd == "teardown":
+        teardown.cmd_teardown()
+        return 0
+
+    if cmd == "reset":
+        if args.hard:
+            teardown.cmd_reset_hard(yes=args.yes)
+        else:
+            teardown.cmd_teardown(wipe=True)
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
