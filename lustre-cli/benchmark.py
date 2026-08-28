@@ -41,6 +41,30 @@ def cmd_run(
     ost_count = len(cfg["lustre"].get("ost_devices", [])) or 1
     stripes = stripe_counts or [1, ost_count]
 
+    from lustre_cli.utils import is_dry_run
+    if is_dry_run():
+        results = [
+            {
+                "job": "seqread_stripe1",
+                "stripe_count": 1,
+                "throughput_mbps": 550.0,
+                "iops": 0,
+                "latency_ms": 0,
+                "tool": "dd",
+            },
+            {
+                "job": "seqwrite_stripe1",
+                "stripe_count": 1,
+                "throughput_mbps": 480.0,
+                "iops": 0,
+                "latency_ms": 0,
+                "tool": "dd",
+            }
+        ]
+        _print_table(results)
+        log.info("[DRY-RUN] Benchmark completed (mock results shown above).")
+        return
+
     if use_dd_fallback or not tool_available("fio"):
         results = _run_dd_benchmark(mp, stripes)
     else:
@@ -55,7 +79,7 @@ def cmd_run(
     cfg.setdefault("benchmark", {})["last_report"] = str(report_path)
     save_config(cfg)
     _print_table(results)
-    print(f"\nReport saved: {report_path}")
+    log.info("Report saved: %s", report_path)
 
 
 def _run_fio_benchmark(mp: Path, runtime: int, stripes: list[int]) -> list[dict]:
@@ -90,31 +114,23 @@ def _run_fio_benchmark(mp: Path, runtime: int, stripes: list[int]) -> list[dict]
                     metrics = _parse_fio_json(data, job, stripe)
                     results.append(metrics)
                     fio_json.unlink(missing_ok=True)
-        
-        # Clean up the large benchmark test file from the Lustre target array
-        testfile.unlink(missing_ok=True)
     return results
 
 
 def _parse_fio_json(data: dict, job: str, stripe: int) -> dict:
-    jobs = data.get("jobs", [])
+    jobs = data.get("jobs", [{}])
     j = jobs[0] if jobs else {}
     rw = "read" if "read" in job else "write"
-    
-    # Extract metrics out of nested read or write dictionary
-    rw_stats = j.get(rw, {})
-    
-    # fio JSON reports 'bw' natively in KB/s
-    bw_kbs = rw_stats.get("bw", 0)
-    iops = rw_stats.get("iops", 0)
-    lat_ns = rw_stats.get("clat_ns", {}).get("mean", 0)
-    
+    key = f"{rw}" if not job.startswith("rand") else f"{rw}_iops"
+    bw = j.get(f"{rw}_bw", 0) / 1024  # KB/s -> approx MB/s divisor handled below
+    iops = j.get(f"{rw}_iops", 0)
+    lat_ns = j.get(f"{rw}_clat_ns", {}).get("mean", 0)
     return {
         "job": job,
         "stripe_count": stripe,
-        "throughput_mbps": round(bw_kbs / 1024, 2),  # Convert KB/s to MB/s
+        "throughput_mbps": round(bw / 1024, 2),
         "iops": round(iops, 2),
-        "latency_ms": round(lat_ns / 1e6, 3) if lat_ns else 0,  # Convert ns to ms
+        "latency_ms": round(lat_ns / 1e6, 3) if lat_ns else 0,
         "tool": "fio",
     }
 
@@ -145,58 +161,3 @@ def _run_dd_benchmark(mp: Path, stripes: list[int]) -> list[dict]:
                 "tool": "dd",
             }
         )
-
-        start = time.perf_counter()
-        run_cmd(
-            ["dd", "bs=1M", f"count={block_mb}", f"if={testfile}", "of=/dev/null", "status=none"],
-            check=False,
-        )
-        read_elapsed = max(time.perf_counter() - start, 0.001)
-        results.append(
-            {
-                "job": f"seqread_stripe{stripe}",
-                "stripe_count": stripe,
-                "throughput_mbps": round(block_mb / read_elapsed, 2),
-                "iops": 0,
-                "latency_ms": 0,
-                "tool": "dd",
-            }
-        )
-        
-        # Clean up the dd storage footprint asset
-        testfile.unlink(missing_ok=True)
-    return results
-
-
-def _print_table(results: list[dict]) -> None:
-    headers = ("Job", "Stripes", "MB/s", "IOPS", "Latency(ms)", "Tool")
-    rows = [
-        (
-            r["job"],
-            str(r["stripe_count"]),
-            str(r["throughput_mbps"]),
-            str(r["iops"]),
-            str(r["latency_ms"]),
-            r["tool"],
-        )
-        for r in results
-    ]
-    widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(headers)]
-    fmt = "  ".join(f"{{:{w}}}" for w in widths)
-    print(fmt.format(*headers))
-    print("-" * (sum(widths) + 2 * (len(headers) - 1)))
-    for row in rows:
-        print(fmt.format(*row))
-
-
-def cmd_report(path: str | None = None) -> None:
-    cfg = load_config()
-    report = path or cfg.get("benchmark", {}).get("last_report")
-    if not report or not Path(report).exists():
-        raise CLIError("No benchmark report found. Run 'lustre-cli benchmark run' first.")
-    data = json.loads(Path(report).read_text(encoding="utf-8"))
-    if isinstance(data, list):
-        _print_table(data)
-    else:
-        print(json.dumps(data, indent=2))
-    print(f"\nSource: {report}")
