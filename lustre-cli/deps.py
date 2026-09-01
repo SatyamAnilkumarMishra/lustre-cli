@@ -40,14 +40,9 @@ ALL_TOOLS = {name for group in TOOL_GROUPS.values() for name, _ in group}
 
 def check_tools(group: str | None = None) -> None:
     missing: list[str] = []
-    
-    if group is not None:
-        # Strict Guard: Catch developer typos immediately instead of falling back blindly
-        if group not in TOOL_GROUPS:
-            raise ValueError(f"Internal Error: Unknown tool verification group requested: '{group}'")
+    if group and group in TOOL_GROUPS:
         tools = TOOL_GROUPS[group]
     else:
-        # Explicit fallback if all tools are intentionally requested
         tools = [(n, d) for g in TOOL_GROUPS.values() for n, d in g]
 
     seen: set[str] = set()
