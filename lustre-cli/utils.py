@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
 from typing import Sequence
 
 from lustre_cli.logging_util import get_logger
+
+log = get_logger()
+
+_DRY_RUN = False
+
+
+def set_dry_run(val: bool) -> None:
+    global _DRY_RUN
+    _DRY_RUN = val
+
+
+def is_dry_run() -> bool:
+    return _DRY_RUN
 
 
 class CLIError(Exception):
@@ -20,8 +32,9 @@ class CLIError(Exception):
 
 
 def require_root() -> None:
-    # FIXED: Clean, standard attribute tracking using top-level explicit imports
-    if hasattr(os, "geteuid") and os.geteuid() != 0:
+    if is_dry_run():
+        return
+    if hasattr(os := __import__("os"), "geteuid") and os.geteuid() != 0:
         raise CLIError("This operation requires root privileges. Run with sudo.", 77)
 
 
@@ -32,13 +45,25 @@ def run_cmd(
     capture: bool = False,
     input_text: str | None = None,
     timeout: int | None = None,
+    sensitive: set[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    if not args:
-        raise CLIError("Empty command sequence provided to runtime engine.")
+    cmd_str = " ".join(args)
+    cmd_str_logged = cmd_str
+    if sensitive:
+        for val in sensitive:
+            if val:
+                cmd_str_logged = cmd_str_logged.replace(val, "***REDACTED***")
 
-    log = get_logger()
-    log.debug("Running: %s", " ".join(args))
-    
+    if is_dry_run():
+        log.info("[DRY-RUN] Would run: %s", cmd_str_logged)
+        return subprocess.CompletedProcess(
+            args=list(args),
+            returncode=0,
+            stdout="[DRY-RUN] stdout",
+            stderr="[DRY-RUN] stderr",
+        )
+
+    log.debug("Running: %s", cmd_str_logged)
     try:
         result = subprocess.run(
             list(args),
@@ -51,45 +76,42 @@ def run_cmd(
     except FileNotFoundError as exc:
         raise CLIError(f"Command not found: {args[0]}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise CLIError(f"Command timed out: {' '.join(args)}") from exc
+        raise CLIError(f"Command timed out: {cmd_str_logged}") from exc
 
     if check and result.returncode != 0:
-        # FIXED: Safeguard against uncaptured stream instances producing blank lines
         err = (result.stderr or result.stdout or "").strip()
-        if not err and not capture:
-            err = "[Console output streamed directly to terminal standard error]"
-            
+        if sensitive:
+            for val in sensitive:
+                if val:
+                    err = err.replace(val, "***REDACTED***")
         raise CLIError(
-            f"Command failed ({result.returncode}): {' '.join(args)}\n{err}".strip(),
+            f"Command failed ({result.returncode}): {cmd_str_logged}\n{err}",
             result.returncode or 1,
         )
     return result
 
 
 def tool_available(name: str) -> bool:
+    if is_dry_run():
+        return True
     return shutil.which(name) is not None
 
 
 def device_size_bytes(path: str) -> int:
+    if is_dry_run():
+        return 2147483648  # mock 2 GB
     result = run_cmd(["blockdev", "--getsize64", path], capture=True)
     return int(result.stdout.strip())
 
 
-def human_size(num_bytes: int | float) -> str:
-    # FIXED: Strip float decoration from low-level absolute byte readouts
-    if num_bytes < 1024:
-        return f"{int(num_bytes)} B"
-        
-    for unit in ("KB", "MB", "GB", "TB"):
-        num_bytes /= 1024
+def human_size(num_bytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
         if num_bytes < 1024:
             return f"{num_bytes:.2f} {unit}"
-            
+        num_bytes /= 1024
     return f"{num_bytes:.2f} PB"
 
 
 def die(message: str, code: int = 1) -> None:
-    log = get_logger()
     log.error(message)
-    print(message, file=sys.stderr)
     sys.exit(code)
