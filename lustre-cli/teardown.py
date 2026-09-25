@@ -1,4 +1,4 @@
-"""Module 7 — Teardown and cleanup."""
+"""Module 7 — Teardown and cleanup with state tracking and logging."""
 
 from __future__ import annotations
 
@@ -7,80 +7,101 @@ from lustre_cli.config import load_config, save_config
 from lustre_cli.deps import check_tools
 from lustre_cli.logging_util import get_logger
 from lustre_cli.utils import CLIError, require_root, run_cmd
+from lustre_cli.state import load_state, save_state
+
+log = get_logger()
 
 
 def cmd_teardown(wipe: bool = False) -> None:
     require_root()
     check_tools("general")
-    log = get_logger()
     cfg = load_config()
+    state = load_state()
 
     log.info("Starting teardown (clients -> OST -> MDT -> MGS)")
     try:
         deploy.cmd_unmount()
     except CLIError as exc:
-        log.warning("Unmount: %s", exc)
+        log.warning("Unmount failed during teardown: %s", exc)
 
-    # FIXED: Wipe block devices while iSCSI fabrics are still logged in and mapped
-    if wipe:
-        _wipe_devices(cfg)
-
-    sessions = cfg.get("initiator", {}).get("sessions", [])
+    sessions = state.get("sessions", [])
     for s in sessions:
         try:
             initiator.cmd_logout(s["host"], s["iqn"], s.get("port", 3260))
         except CLIError as exc:
-            log.warning("Logout %s: %s", s.get("iqn"), exc)
+            log.warning("Logout %s failed during teardown: %s", s.get("iqn"), exc)
 
-    print("Teardown complete.")
+    if wipe:
+        _wipe_devices(cfg)
+
+    log.info("Teardown complete.")
 
 
-def cmd_reset_hard() -> None:
+def cmd_reset_hard(yes: bool = False) -> None:
     require_root()
-    log = get_logger()
-    
-    # Snapshot target IQNs from current disk state before invoking subcommands
-    initial_cfg = load_config()
-    target_iqns = [t["iqn"] for t in initial_cfg.get("targets", []) if "iqn" in t]
+    cfg = load_config()
+    state = load_state()
 
-    # Executes teardown (and wipes active target connections cleanly)
+    from lustre_cli.utils import is_dry_run
+    if not yes and not is_dry_run():
+        targets = state.get("targets", [])
+        sessions = state.get("sessions", [])
+        devices = []
+        lustre = cfg.get("lustre", {})
+        for key in ("mgs_device", "mdt_device"):
+            if lustre.get(key):
+                devices.append(lustre[key])
+        devices.extend(lustre.get("ost_devices", []))
+
+        print("WARNING: You are about to perform a hard reset!")
+        print("This will destroy all data on the following devices:")
+        for dev in devices:
+            print(f"  - {dev}")
+        print("This will delete the following iSCSI targets:")
+        for t in targets:
+            print(f"  - {t['iqn']}")
+        print(f"This will log out and delete {len(sessions)} active initiator sessions.")
+        
+        val = input("Are you absolutely sure you want to proceed? [y/N]: ")
+        if val.lower() not in ("y", "yes"):
+            raise CLIError("Operation cancelled.")
+
     cmd_teardown(wipe=True)
 
-    # Clean target frameworks individually
-    for iqn in target_iqns:
+    for t in list(state.get("targets", [])):
         try:
-            target.cmd_delete(iqn=iqn)
+            target.cmd_delete(iqn=t["iqn"])
         except CLIError as exc:
-            log.warning("Target delete %s: %s", iqn, exc)
+            log.warning("Target delete %s failed: %s", t.get("iqn"), exc)
 
-    # Execute absolute fallback fabric flushes
     run_cmd(["iscsiadm", "-m", "node", "--op", "delete"], check=False)
     run_cmd(["targetcli", "clearconfig", "confirm=true"], check=False)
     run_cmd(["targetcli", "saveconfig"], check=False)
 
-    # FIXED: Reload config from disk to obtain current state updates before updating
-    cfg = load_config()
+    # Clear state & config
+    state["targets"] = []
+    state["sessions"] = []
+    state["formatted"] = {}
+    state["mounted"] = {}
+    save_state(state)
+
     cfg["targets"] = []
     cfg.setdefault("initiator", {})["sessions"] = []
-    cfg.setdefault("lustre", {})["ost_devices"] = []
+    cfg["lustre"]["ost_devices"] = []
     save_config(cfg)
     
-    log.info("Hard reset completed")
-    print("Hard reset complete. Config cleared; targets and sessions removed.")
+    log.info("Hard reset complete. Config cleared; targets and sessions removed.")
 
 
 def _wipe_devices(cfg: dict) -> None:
-    log = get_logger()
     devices = []
     lustre = cfg.get("lustre", {})
-    
     for key in ("mgs_device", "mdt_device"):
         if lustre.get(key):
             devices.append(lustre[key])
-            
     devices.extend(lustre.get("ost_devices", []))
     for dev in devices:
         if dev:
             log.info("Wiping %s", dev)
             run_cmd(["wipefs", "-a", dev], check=False)
-            print(f"Wiped signatures on {dev}")
+            log.info("Wiped signatures on %s", dev)
